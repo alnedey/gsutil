@@ -158,11 +158,6 @@ def MakeRequest(http, http_request, retries=7, redirections=5):
         raise
       logging.error('Caught socket error, retrying: %s', e)
       exc = e
-    except httplib.IncompleteRead as e:
-      if http_request.http_method != 'GET':
-        raise
-      logging.error('Caught IncompleteRead error, retrying: %s', e)
-      exc = e
     if info is not None:
       response = Response(info, content, http_request.url)
       if (response.status_code < 500 and

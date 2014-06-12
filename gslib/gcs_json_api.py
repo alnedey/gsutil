@@ -13,11 +13,16 @@
 # limitations under the License.
 """JSON gsutil Cloud API implementation for Google Cloud Storage."""
 
+import httplib
 import json
+import socket
+import ssl
+import time
 
 import boto
 from boto import config
 from gcs_oauth2_boto_plugin import oauth2_helper
+import httplib2
 from oauth2client import multistore_file
 
 from gslib.cloud_api import AccessDeniedException
@@ -524,50 +529,77 @@ class GcsJsonApi(CloudApi):
     apitools_request = apitools_messages.StorageObjectsGetRequest(
         bucket=bucket_name, object=object_name, generation=generation)
 
-    if not serialization_data:
+    retries = 0
+    max_retries = 7
+    while retries < max_retries:
       try:
-        self.api_client.objects.Get(apitools_request,
-                                    download=apitools_download)
-      except TRANSLATABLE_APITOOLS_EXCEPTIONS, e:
-        self._TranslateExceptionAndRaise(e, bucket_name=bucket_name,
-                                         object_name=object_name,
-                                         generation=generation)
-
-    # Disable apitools' default print callbacks.
-    def _NoopCallback(unused_response, unused_download_object):
-      pass
-
-    # TODO: If we have a resumable download with accept-encoding:gzip
-    # on a object that is compressible but not in gzip form in the cloud,
-    # on-the-fly compression will gzip the object.  In this case if our
-    # download breaks, future requests will ignore the range header and just
-    # return the object (gzipped) in its entirety.  Ideally, we would unzip
-    # the bytes that we have locally and send a range request without
-    # accept-encoding:gzip so that we can download only the (uncompressed) bytes
-    # that we don't yet have.
-
-    # Since bytes_http is created in this function, we don't get the
-    # user-agent header from api_client's http automatically.
-    additional_headers = {
-        'accept-encoding': 'gzip',
-        'user-agent': self.api_client.user_agent
-    }
-    try:
-      if start_byte or end_byte:
-        apitools_download.GetRange(additional_headers=additional_headers,
-                                   start=start_byte, end=end_byte)
-      else:
-        apitools_download.StreamInChunks(
-            callback=_NoopCallback, finish_callback=_NoopCallback,
-            additional_headers=additional_headers)
-      return apitools_download.encoding
-    except TRANSLATABLE_APITOOLS_EXCEPTIONS, e:
-      self._TranslateExceptionAndRaise(e, bucket_name=bucket_name,
-                                       object_name=object_name,
-                                       generation=generation)
-    except apitools_exceptions.TransferInvalidError, _:
-      raise ServiceException(
-          'Transfer invalid (possible encoding error)')
+        if not serialization_data:
+          try:
+            self.api_client.objects.Get(apitools_request,
+                                        download=apitools_download)
+          except TRANSLATABLE_APITOOLS_EXCEPTIONS, e:
+            self._TranslateExceptionAndRaise(e, bucket_name=bucket_name,
+                                             object_name=object_name,
+                                             generation=generation)
+    
+        # Disable apitools' default print callbacks.
+        def _NoopCallback(unused_response, unused_download_object):
+          pass
+    
+        # TODO: If we have a resumable download with accept-encoding:gzip
+        # on a object that is compressible but not in gzip form in the cloud,
+        # on-the-fly compression will gzip the object.  In this case if our
+        # download breaks, future requests will ignore the range header and just
+        # return the object (gzipped) in its entirety.  Ideally, we would unzip
+        # the bytes that we have locally and send a range request without
+        # accept-encoding:gzip so that we can download only the (uncompressed) bytes
+        # that we don't yet have.
+    
+        # Since bytes_http is created in this function, we don't get the
+        # user-agent header from api_client's http automatically.
+        additional_headers = {
+            'accept-encoding': 'gzip',
+            'user-agent': self.api_client.user_agent
+        }
+        try:
+          if start_byte or end_byte:
+            apitools_download.GetRange(additional_headers=additional_headers,
+                                       start=start_byte, end=end_byte)
+          else:
+            apitools_download.StreamInChunks(
+                callback=_NoopCallback, finish_callback=_NoopCallback,
+                additional_headers=additional_headers)
+          return apitools_download.encoding
+        except TRANSLATABLE_APITOOLS_EXCEPTIONS, e:
+          self._TranslateExceptionAndRaise(e, bucket_name=bucket_name,
+                                           object_name=object_name,
+                                           generation=generation)
+        except apitools_exceptions.TransferInvalidError, _:
+          raise ServiceException(
+              'Transfer invalid (possible encoding error)')
+      except (httplib2.ServerNotFoundError,
+              httplib.IncompleteRead,
+              httplib.ResponseNotReady,
+              socket.gaierror,
+              ssl.SSLError) as e:
+        if download_strategy == CloudApi.DownloadStrategy.RESUMABLE:
+          if retries >= max_retries:
+            raise ServiceException('Transfer failed after %d retries' % max_retries)
+          start_byte = download_stream.tell()
+          retries += 1
+          time.sleep(2 ** retries)
+          # We need to rebuild the connection. Luckily, httplib2 overloads the map
+          # in http.connections to contain two different types of values:
+          # { scheme string :  connection class } and
+          # { scheme + authority string : actual http connection }
+          # Here we remove all of the entries for actual connections so that on the
+          # next request httplib2 will rebuild them from the connection types.
+          if getattr(apitools_download.bytes_http, 'connections', None):
+            for conn_key in apitools_download.bytes_http.connections.keys():
+              if ':' in conn_key:
+                del apitools_download.bytes_http.connections[conn_key]
+        else:
+          raise
 
   def PatchObjectMetadata(self, bucket_name, object_name, metadata,
                           generation=None, preconditions=None, provider=None,
