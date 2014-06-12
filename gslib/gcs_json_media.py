@@ -30,6 +30,7 @@ from gslib.util import TRANSFER_BUFFER_SIZE
 # By default, the timeout for ssl read errors is infinite. This could
 # cause gsutil to hang on network disconnect, so pick a more reasonable
 # timeout.
+# TODO: Raise this to 60 once debugging is complete.
 SSL_TIMEOUT = 5
 
 class BytesUploadedContainer(object):

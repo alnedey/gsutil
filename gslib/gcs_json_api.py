@@ -535,7 +535,7 @@ class GcsJsonApi(CloudApi):
           apitools_download, generation=generation, start_byte=start_byte,
           end_byte=end_byte, serialization_data=serialization_data)
     else:
-       return self._PerformDownload(
+      return self._PerformDownload(
           bucket_name, object_name, download_stream, apitools_request,
           apitools_download, generation=generation, start_byte=start_byte,
           end_byte=end_byte, serialization_data=serialization_data)
@@ -559,25 +559,25 @@ class GcsJsonApi(CloudApi):
               socket.gaierror,
               ssl.SSLError) as e:
         if retries >= max_retries:
-	  raise ServiceException('Transfer failed after %d retries' % max_retries)
-	start_byte = download_stream.tell()
+          raise ServiceException('Transfer failed after %d retries' % max_retries)
+        start_byte = download_stream.tell()
         if start_byte > last_progress_byte:
           # We've made progress, so allow a fresh set of retries.
           last_progress_byte = start_byte
           retries = 0
-	retries += 1
-	time.sleep(2 ** retries)
-	print 'Retrying download from byte %s after exception %s' % (start_byte, e)
-	# We need to rebuild the connection. Luckily, httplib2 overloads the map
-	# in http.connections to contain two different types of values:
-	# { scheme string :  connection class } and
-	# { scheme + authority string : actual http connection }
-	# Here we remove all of the entries for actual connections so that on the
-	# next request httplib2 will rebuild them from the connection types.
-	if getattr(apitools_download.bytes_http, 'connections', None):
-	  for conn_key in apitools_download.bytes_http.connections.keys():
-	    if ':' in conn_key:
-	      del apitools_download.bytes_http.connections[conn_key]
+        retries += 1
+        time.sleep(2 ** retries)
+        print 'Retrying download from byte %s after exception %s' % (start_byte, e)
+        # We need to rebuild the connection. Luckily, httplib2 overloads the map
+        # in http.connections to contain two different types of values:
+        # { scheme string :  connection class } and
+        # { scheme + authority string : actual http connection }
+        # Here we remove all of the entries for actual connections so that on the
+        # next request httplib2 will rebuild them from the connection types.
+        if getattr(apitools_download.bytes_http, 'connections', None):
+          for conn_key in apitools_download.bytes_http.connections.keys():
+            if ':' in conn_key:
+              del apitools_download.bytes_http.connections[conn_key]
 
   def _PerformDownload(
       self, bucket_name, object_name, download_stream, apitools_request,
@@ -585,10 +585,10 @@ class GcsJsonApi(CloudApi):
       serialization_data=None):
     if not serialization_data:
       try:
-	self.api_client.objects.Get(apitools_request,
+        self.api_client.objects.Get(apitools_request,
 				    download=apitools_download)
       except TRANSLATABLE_APITOOLS_EXCEPTIONS, e:
-	self._TranslateExceptionAndRaise(e, bucket_name=bucket_name,
+        self._TranslateExceptionAndRaise(e, bucket_name=bucket_name,
 					 object_name=object_name,
 					 generation=generation)
 
@@ -613,10 +613,10 @@ class GcsJsonApi(CloudApi):
     }
     try:
       if start_byte or end_byte:
-	apitools_download.GetRange(additional_headers=additional_headers,
+        apitools_download.GetRange(additional_headers=additional_headers,
 				   start=start_byte, end=end_byte)
       else:
-	apitools_download.StreamInChunks(
+        apitools_download.StreamInChunks(
 	    callback=_NoopCallback, finish_callback=_NoopCallback,
 	    additional_headers=additional_headers)
       return apitools_download.encoding
@@ -753,11 +753,42 @@ class GcsJsonApi(CloudApi):
           if tracker_callback:
             tracker_callback(json.dumps(apitools_upload.serialization_data))
 
-          http_response = apitools_upload.StreamInChunks(
-              callback=_NoopCallback, finish_callback=_NoopCallback,
-              additional_headers=additional_headers)
-          return self.api_client.objects.ProcessHttpResponse(
-              self.api_client.objects.GetMethodConfig('Insert'), http_response)
+          retries = 0
+          max_retries = 7
+          last_progress_byte = apitools_upload.progress
+          while retries < max_retries:
+            try:
+              http_response = apitools_upload.StreamInChunks(
+                  callback=_NoopCallback, finish_callback=_NoopCallback,
+                  additional_headers=additional_headers)
+              return self.api_client.objects.ProcessHttpResponse(
+                  self.api_client.objects.GetMethodConfig('Insert'), http_response)
+            except (httplib2.ServerNotFoundError,
+                    httplib.IncompleteRead,
+                    httplib.ResponseNotReady,
+                    socket.gaierror,
+                    ssl.SSLError) as e:
+              if retries >= max_retries:
+                raise ServiceException('Transfer failed after %d retries' % max_retries)
+              apitools_upload._RefreshResumableUploadState()
+              start_byte = apitools_upload.progress
+              if start_byte > last_progress_byte:
+                # We've made progress, so allow a fresh set of retries.
+                last_progress_byte = start_byte
+                retries = 0
+              retries += 1
+              time.sleep(2 ** retries)
+              print 'Retrying upload from byte %s after exception %s' % (start_byte, e)
+              # We need to rebuild the connection. Luckily, httplib2 overloads the map
+              # in http.connections to contain two different types of values:
+              # { scheme string :  connection class } and
+              # { scheme + authority string : actual http connection }
+              # Here we remove all of the entries for actual connections so that on the
+              # next request httplib2 will rebuild them from the connection types.
+              if getattr(apitools_upload.bytes_http, 'connections', None):
+                for conn_key in apitools_upload.bytes_http.connections.keys():
+                  if ':' in conn_key:
+                    del apitools_upload.bytes_http.connections[conn_key]
         except TRANSLATABLE_APITOOLS_EXCEPTIONS, e:
           resumable_ex = self._TranslateApitoolsResumableUploadException(e)
           if resumable_ex:
