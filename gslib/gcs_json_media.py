@@ -33,6 +33,7 @@ from gslib.util import TRANSFER_BUFFER_SIZE
 # TODO: Raise this to 60 once debugging is complete.
 SSL_TIMEOUT = 5
 
+
 class BytesUploadedContainer(object):
   """Container class for passing number of bytes uploaded to lower layers.
 

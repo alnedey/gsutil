@@ -33,6 +33,7 @@ from gslib.cloud_api import NotEmptyException
 from gslib.cloud_api import NotFoundException
 from gslib.cloud_api import PreconditionException
 from gslib.cloud_api import Preconditions
+from gslib.cloud_api import ResumableDownloadException
 from gslib.cloud_api import ResumableUploadAbortException
 from gslib.cloud_api import ResumableUploadException
 from gslib.cloud_api import ServiceException
@@ -86,6 +87,13 @@ def _ResumableChunkSize():
 TRANSLATABLE_APITOOLS_EXCEPTIONS = (apitools_exceptions.HttpError,
                                     apitools_exceptions.TransferError,
                                     apitools_exceptions.TransferInvalidError)
+
+
+HTTP_TRANSFER_EXCEPTIONS = (httplib2.ServerNotFoundError,
+                            httplib.IncompleteRead,
+                            httplib.ResponseNotReady,
+                            socket.gaierror,
+                            ssl.SSLError)
 
 
 class GcsJsonApi(CloudApi):
@@ -539,7 +547,7 @@ class GcsJsonApi(CloudApi):
           bucket_name, object_name, download_stream, apitools_request,
           apitools_download, generation=generation, start_byte=start_byte,
           end_byte=end_byte, serialization_data=serialization_data)
-      
+
   def _PerformResumableDownload(
       self, bucket_name, object_name, download_stream, apitools_request,
       apitools_download, generation=None, start_byte=0, end_byte=None,
@@ -550,16 +558,13 @@ class GcsJsonApi(CloudApi):
     while retries < max_retries:
       try:
         return self._PerformDownload(
-          bucket_name, object_name, download_stream, apitools_request,
-          apitools_download, generation=generation, start_byte=start_byte,
-          end_byte=end_byte, serialization_data=serialization_data)
-      except (httplib2.ServerNotFoundError,
-              httplib.IncompleteRead,
-              httplib.ResponseNotReady,
-              socket.gaierror,
-              ssl.SSLError) as e:
+            bucket_name, object_name, download_stream, apitools_request,
+            apitools_download, generation=generation, start_byte=start_byte,
+            end_byte=end_byte, serialization_data=serialization_data)
+      except HTTP_TRANSFER_EXCEPTIONS, _:
         if retries >= max_retries:
-          raise ServiceException('Transfer failed after %d retries' % max_retries)
+          raise ResumableDownloadException('Transfer failed after %d retries' %
+                                           max_retries)
         start_byte = download_stream.tell()
         if start_byte > last_progress_byte:
           # We've made progress, so allow a fresh set of retries.
@@ -567,17 +572,9 @@ class GcsJsonApi(CloudApi):
           retries = 0
         retries += 1
         time.sleep(2 ** retries)
-        print 'Retrying download from byte %s after exception %s' % (start_byte, e)
-        # We need to rebuild the connection. Luckily, httplib2 overloads the map
-        # in http.connections to contain two different types of values:
-        # { scheme string :  connection class } and
-        # { scheme + authority string : actual http connection }
-        # Here we remove all of the entries for actual connections so that on the
-        # next request httplib2 will rebuild them from the connection types.
-        if getattr(apitools_download.bytes_http, 'connections', None):
-          for conn_key in apitools_download.bytes_http.connections.keys():
-            if ':' in conn_key:
-              del apitools_download.bytes_http.connections[conn_key]
+        self.logger.info('Retrying download from byte %s after exception.' %
+                         start_byte)
+        self._RebuildHttpConnections(apitools_download.bytes_http)
 
   def _PerformDownload(
       self, bucket_name, object_name, download_stream, apitools_request,
@@ -586,11 +583,11 @@ class GcsJsonApi(CloudApi):
     if not serialization_data:
       try:
         self.api_client.objects.Get(apitools_request,
-				    download=apitools_download)
+                                    download=apitools_download)
       except TRANSLATABLE_APITOOLS_EXCEPTIONS, e:
         self._TranslateExceptionAndRaise(e, bucket_name=bucket_name,
-					 object_name=object_name,
-					 generation=generation)
+                                         object_name=object_name,
+                                         generation=generation)
 
     # Disable apitools' default print callbacks.
     def _NoopCallback(unused_response, unused_download_object):
@@ -608,26 +605,25 @@ class GcsJsonApi(CloudApi):
     # Since bytes_http is created in this function, we don't get the
     # user-agent header from api_client's http automatically.
     additional_headers = {
-	'accept-encoding': 'gzip',
-	'user-agent': self.api_client.user_agent
+        'accept-encoding': 'gzip',
+        'user-agent': self.api_client.user_agent
     }
     try:
       if start_byte or end_byte:
         apitools_download.GetRange(additional_headers=additional_headers,
-				   start=start_byte, end=end_byte)
+                                   start=start_byte, end=end_byte)
       else:
         apitools_download.StreamInChunks(
-	    callback=_NoopCallback, finish_callback=_NoopCallback,
-	    additional_headers=additional_headers)
-      return apitools_download.encoding
+            callback=_NoopCallback, finish_callback=_NoopCallback,
+            additional_headers=additional_headers)
+        return apitools_download.encoding
     except TRANSLATABLE_APITOOLS_EXCEPTIONS, e:
       self._TranslateExceptionAndRaise(e, bucket_name=bucket_name,
-				       object_name=object_name,
-				       generation=generation)
+                                       object_name=object_name,
+                                       generation=generation)
     except apitools_exceptions.TransferInvalidError, _:
       raise ServiceException(
-	  'Transfer invalid (possible encoding error)')
-
+          'Transfer invalid (possible encoding error)')
 
   def PatchObjectMetadata(self, bucket_name, object_name, metadata,
                           generation=None, preconditions=None, provider=None,
@@ -658,6 +654,18 @@ class GcsJsonApi(CloudApi):
       self._TranslateExceptionAndRaise(e, bucket_name=bucket_name,
                                        object_name=object_name,
                                        generation=generation)
+
+  def _RebuildHttpConnections(self, http):
+    # We need to rebuild the connection. Luckily, httplib2 overloads the map
+    # in http.connections to contain two different types of values:
+    # { scheme string :  connection class } and
+    # { scheme + authority string : actual http connection }
+    # Here we remove all of the entries for actual connections so that on the
+    # next request httplib2 will rebuild them from the connection types.
+    if getattr(http, 'connections', None):
+      for conn_key in http.connections.keys():
+        if ':' in conn_key:
+          del http.connections[conn_key]
 
   def _UploadObject(self, upload_stream, object_metadata, canned_acl=None,
                     size=None, preconditions=None, provider=None, fields=None,
@@ -727,77 +735,89 @@ class GcsJsonApi(CloudApi):
             upload=apitools_upload,
             global_params=global_params)
       else:  # Resumable upload.
-        try:
-          if serialization_data:
-            # Resuming an existing upload.
-            apitools_upload = apitools_transfer.Upload.FromData(
-                upload_stream, serialization_data, self.api_client.http)
-            apitools_upload.chunksize = _ResumableChunkSize()
-            apitools_upload.bytes_http = authorized_upload_http
-          else:
-            # New resumable upload.
-            apitools_upload = apitools_transfer.Upload(
-                upload_stream, content_type, total_size=size,
-                chunksize=_ResumableChunkSize(), auto_transfer=False)
-            apitools_upload.strategy = apitools_strategy
-            apitools_upload.bytes_http = authorized_upload_http
-            self.api_client.objects.Insert(
-                apitools_request,
-                upload=apitools_upload,
-                global_params=global_params)
-
-          # If we're resuming an upload, apitools has at this point received
-          # from the server how many bytes it already has. Update our
-          # callback class with this information.
-          bytes_uploaded_container.bytes_uploaded = apitools_upload.progress
-          if tracker_callback:
-            tracker_callback(json.dumps(apitools_upload.serialization_data))
-
-          retries = 0
-          max_retries = 7
-          last_progress_byte = apitools_upload.progress
-          while retries < max_retries:
-            try:
-              http_response = apitools_upload.StreamInChunks(
-                  callback=_NoopCallback, finish_callback=_NoopCallback,
-                  additional_headers=additional_headers)
-              return self.api_client.objects.ProcessHttpResponse(
-                  self.api_client.objects.GetMethodConfig('Insert'), http_response)
-            except (httplib2.ServerNotFoundError,
-                    httplib.IncompleteRead,
-                    httplib.ResponseNotReady,
-                    socket.gaierror,
-                    ssl.SSLError) as e:
-              if retries >= max_retries:
-                raise ServiceException('Transfer failed after %d retries' % max_retries)
-              apitools_upload._RefreshResumableUploadState()
-              start_byte = apitools_upload.progress
-              if start_byte > last_progress_byte:
-                # We've made progress, so allow a fresh set of retries.
-                last_progress_byte = start_byte
-                retries = 0
-              retries += 1
-              time.sleep(2 ** retries)
-              print 'Retrying upload from byte %s after exception %s' % (start_byte, e)
-              # We need to rebuild the connection. Luckily, httplib2 overloads the map
-              # in http.connections to contain two different types of values:
-              # { scheme string :  connection class } and
-              # { scheme + authority string : actual http connection }
-              # Here we remove all of the entries for actual connections so that on the
-              # next request httplib2 will rebuild them from the connection types.
-              if getattr(apitools_upload.bytes_http, 'connections', None):
-                for conn_key in apitools_upload.bytes_http.connections.keys():
-                  if ':' in conn_key:
-                    del apitools_upload.bytes_http.connections[conn_key]
-        except TRANSLATABLE_APITOOLS_EXCEPTIONS, e:
-          resumable_ex = self._TranslateApitoolsResumableUploadException(e)
-          if resumable_ex:
-            raise resumable_ex
-          else:
-            raise
+        self._PerformResumableUpload(
+            upload_stream, authorized_upload_http, content_type, size,
+            serialization_data, apitools_strategy, apitools_request,
+            global_params, bytes_uploaded_container, tracker_callback,
+            _NoopCallback, additional_headers)
     except TRANSLATABLE_APITOOLS_EXCEPTIONS, e:
       self._TranslateExceptionAndRaise(e, bucket_name=object_metadata.bucket,
                                        object_name=object_metadata.name)
+
+  def _PerformResumableUpload(
+      self, upload_stream, authorized_upload_http, content_type, size,
+      serialization_data, apitools_strategy, apitools_request, global_params,
+      bytes_uploaded_container, tracker_callback, noop_callback, addl_headers):
+    try:
+      if serialization_data:
+        # Resuming an existing upload.
+        apitools_upload = apitools_transfer.Upload.FromData(
+            upload_stream, serialization_data, self.api_client.http)
+        apitools_upload.chunksize = _ResumableChunkSize()
+        apitools_upload.bytes_http = authorized_upload_http
+      else:
+        # New resumable upload.
+        apitools_upload = apitools_transfer.Upload(
+            upload_stream, content_type, total_size=size,
+            chunksize=_ResumableChunkSize(), auto_transfer=False)
+        apitools_upload.strategy = apitools_strategy
+        apitools_upload.bytes_http = authorized_upload_http
+        self.api_client.objects.Insert(
+            apitools_request,
+            upload=apitools_upload,
+            global_params=global_params)
+
+      # If we're resuming an upload, apitools has at this point received
+      # from the server how many bytes it already has. Update our
+      # callback class with this information.
+      bytes_uploaded_container.bytes_uploaded = apitools_upload.progress
+      if tracker_callback:
+        tracker_callback(json.dumps(apitools_upload.serialization_data))
+
+      retries = 0
+      max_retries = 4
+      last_progress_byte = apitools_upload.progress
+      while retries < max_retries:
+        try:
+          http_response = apitools_upload.StreamInChunks(
+              callback=noop_callback, finish_callback=noop_callback,
+              additional_headers=addl_headers)
+          return self.api_client.objects.ProcessHttpResponse(
+              self.api_client.objects.GetMethodConfig('Insert'), http_response)
+        except HTTP_TRANSFER_EXCEPTIONS, e:
+          if retries >= max_retries:
+            raise ResumableUploadException(
+                'Transfer failed after %d retries. Final exception %s' %
+                (max_retries, e))
+          self._RebuildHttpConnections(apitools_upload.bytes_http)
+          while retries < max_retries:
+            try:
+              apitools_upload._RefreshResumableUploadState()
+              start_byte = apitools_upload.progress
+              break
+            except HTTP_TRANSFER_EXCEPTIONS, e2:
+              self._RebuildHttpConnections(apitools_upload.bytes_http)
+              retries += 1
+              time.sleep(2 ** retries)
+          if retries >= max_retries:
+            raise ResumableUploadException(
+                'Transfer failed after %d retries. Final exception %s' %
+                (max_retries, e2))
+          if start_byte > last_progress_byte:
+            # We've made progress, so allow a fresh set of retries.
+            last_progress_byte = start_byte
+            retries = 0
+          else:
+            retries += 1
+            time.sleep(2 ** retries)
+          self.logger.info('Retrying upload from byte %s after exception.'
+                           %start_byte)
+    except TRANSLATABLE_APITOOLS_EXCEPTIONS, e:
+      resumable_ex = self._TranslateApitoolsResumableUploadException(e)
+      if resumable_ex:
+        raise resumable_ex
+      else:
+        raise
 
   def UploadObject(self, upload_stream, object_metadata, canned_acl=None,
                    size=None, preconditions=None, progress_callback=None,
