@@ -166,9 +166,6 @@ def MakeRequest(http, http_request, retries=7, redirections=5):
         break
       logging.info('Retrying request to url <%s> after status code %s',
                    response.request_url, response.status_code)
-    elif isinstance(exc, httplib.IncompleteRead):
-      logging.info('Retrying request to url <%s> after incomplete read.',
-                   str(http_request.url))
     else:
       logging.info('Retrying request to url <%s> after connection break.',
                    str(http_request.url))
