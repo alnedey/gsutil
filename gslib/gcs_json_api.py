@@ -706,6 +706,9 @@ class GcsJsonApi(CloudApi):
     }
 
     try:
+      content_type = None
+      apitools_request = None
+      global_params = None
       if not serialization_data:
         # This is a new upload, set up initial upload state.
         content_type = object_metadata.contentType
@@ -735,7 +738,7 @@ class GcsJsonApi(CloudApi):
             upload=apitools_upload,
             global_params=global_params)
       else:  # Resumable upload.
-        self._PerformResumableUpload(
+        return self._PerformResumableUpload(
             upload_stream, authorized_upload_http, content_type, size,
             serialization_data, apitools_strategy, apitools_request,
             global_params, bytes_uploaded_container, tracker_callback,
