@@ -175,7 +175,7 @@ def MakeRequest(http, http_request, retries=7, redirections=5):
     else:
       time.sleep(2 ** retry)
   if response is None:
-    raise exceptions.InvalidDataFromServerError(
+    raise exc if exc else exceptions.InvalidDataFromServerError(
         'HTTP error on final retry: %s' % exc)
   return response
 

@@ -89,10 +89,12 @@ TRANSLATABLE_APITOOLS_EXCEPTIONS = (apitools_exceptions.HttpError,
                                     apitools_exceptions.TransferInvalidError)
 
 
-HTTP_TRANSFER_EXCEPTIONS = (httplib2.ServerNotFoundError,
-                            httplib.IncompleteRead,
+HTTP_TRANSFER_EXCEPTIONS = (httplib.IncompleteRead,
                             httplib.ResponseNotReady,
+                            httplib2.ServerNotFoundError,
+                            socket.error,
                             socket.gaierror,
+                            socket.timeout,
                             ssl.SSLError)
 
 
