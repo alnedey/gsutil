@@ -618,7 +618,7 @@ class GcsJsonApi(CloudApi):
         apitools_download.StreamInChunks(
             callback=_NoopCallback, finish_callback=_NoopCallback,
             additional_headers=additional_headers)
-        return apitools_download.encoding
+      return apitools_download.encoding
     except TRANSLATABLE_APITOOLS_EXCEPTIONS, e:
       self._TranslateExceptionAndRaise(e, bucket_name=bucket_name,
                                        object_name=object_name,
@@ -784,6 +784,9 @@ class GcsJsonApi(CloudApi):
       last_progress_byte = apitools_upload.progress
       while retries < max_retries:
         try:
+          # TODO: On retry, this will seek to the bytes that the server has,
+          # causing the hash to be recalculated. Make HashingFileUploadWrapper
+          # save a digest according to json_resumable_chunk_size.
           http_response = apitools_upload.StreamInChunks(
               callback=noop_callback, finish_callback=noop_callback,
               additional_headers=addl_headers)
